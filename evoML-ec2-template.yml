@@ -1,0 +1,155 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: evoML cloudformation template EC2
+
+Parameters:
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the web server
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+  DefaultAdminEmail:
+    Description: The default administrator email
+    Type: String
+    ConstraintDescription: must be a valid email address.
+    Default: sysadmin@turintech.ai
+    AllowedPattern: (?:[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*|"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])*")@(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|\[(?:(?:(2(5[0-5]|[0-4][0-9])|1[0-9][0-9]|[1-9]?[0-9]))\.){3}(?:(2(5[0-5]|[0-4][0-9])|1[0-9][0-9]|[1-9]?[0-9])|[a-z0-9-]*[a-z0-9]:(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x53-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])+)\])
+  DefaultAdminPassword:
+    Description: The default administrator password
+    Type: String
+    MinLength: 8
+    ConstraintDescription: The password must be at least 8 characters
+    Default: evomladmin
+  InstanceType:
+    Description: WebServer EC2 instance type
+    Type: String
+    Default: t2.2xlarge
+    AllowedValues:
+      - t2.2xlarge
+    ConstraintDescription: must be a valid EC2 instance type.
+  SSHLocation:
+    Description: >
+      Lockdown SSH access to the bastion host (default can be accessed
+      from anywhere)
+    Type: String
+    MinLength: "9"
+    MaxLength: "18"
+    Default: 0.0.0.0/0
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    ConstraintDescription: must be a valid CIDR range of the form x.x.x.x/x.
+
+Resources:
+  EvomlSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: My SG with port 22, 8080 and 80 inbound
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "80"
+          ToPort: "80"
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: !Ref SSHLocation
+
+  EvomlVMInstance:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT5M
+    Metadata:
+      Comment: Deploy a simple tomcat Application
+      AWS::CloudFormation::Init:
+        configSets:
+          EvomlStartup:
+            - Configuration
+            - Startup
+        Configuration:
+          files:
+            "/etc/cfn/cfn-hup.conf":
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+                interval=3
+              mode: "000400"
+              owner: "root"
+              group: "root"
+            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.EvomlVMInstance.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource EvomlVMInstance --configsets EvomlStartup --region ${AWS::Region}
+              mode: "000400"
+              owner: "root"
+              group: "root"
+          packages:
+            yum:
+              docker: []
+              make: []
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: "true"
+                ensureRunning: "true"
+                files:
+                  - "/etc/cfn/cfn-hup.conf"
+                  - "/etc/cfn/hooks.d/cfn-auto-reloader.conf"
+              docker:
+                enabled: "true"
+                ensureRunning: "true"
+          commands:
+            docker_compose_global:
+              command: ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
+            docker_for_ec2_user:
+              command: usermod -G docker ec2-user
+        Startup:
+          files:
+            /home/ec2-user/docker-deployer/.env.production:
+              content: !Sub |
+                IMAGE_TAG=1.7.4
+                THANOS_SYSTEM_USERNAME=${DefaultAdminEmail}
+                THANOS_SYSTEM_PASSWORD=${DefaultAdminPassword}
+                COMPOSE_COMMAND=docker-compose
+              mode: "000644"
+              owner: "root"
+              group: "root"
+          commands:
+            1_ecr_login:
+              command: aws ecr get-login-password --region eu-west-2 | docker login --username AWS --password-stdin https://501091700112.dkr.ecr.eu-west-2.amazonaws.com
+            2_start_evoml:
+              command: make deploy
+              cwd: /home/ec2-user/docker-deployer
+            3_create_users:
+              command: make create-users
+              cwd: /home/ec2-user/docker-deployer
+
+    Properties:
+      ImageId: ami-03b542579c6a3d03a
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      # BlockDeviceMappings:
+      #   - DeviceName: "/dev/xvda"
+      #     Ebs:
+      #       DeleteOnTermination: "true"
+      #       VolumeSize: "102"
+      #       VolumeType: "gp2"
+      SecurityGroups:
+        - !Ref EvomlSecurityGroup
+      Tags:
+        - Key: Name
+          Value: evoml-generated-instance
+      UserData:
+        "Fn::Base64": !Sub |
+          #!/bin/bash -xe
+          # Get latest CloudFormation package - These packages change frequently
+          yum update -y aws-cfn-bootstrap
+          # Start cfn-init to Install all Metadata content (pacakges, sources, files, commands and services )
+          /opt/aws/bin/cfn-init -s ${AWS::StackId} -r EvomlVMInstance --configsets EvomlStartup --region ${AWS::Region} || error_exit 'Failed to run cfn-init'
+          # Signal the status from cfn-init 
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource EvomlVMInstance --region ${AWS::Region}
+          # Start cfn-hup daemon so that it will keep listening to any changes to EC2 Instance Metadata.
+Outputs:
+  EC2IpAddress:
+    Description: "EC2 Public IP Address"
+    Value: !GetAtt EvomlVMInstance.PublicIp

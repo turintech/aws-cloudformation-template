@@ -1,0 +1,10 @@
+project:
+  name: evoml
+  regions:
+    - eu-west-2
+tests:
+  ec2:
+    template: ./evoML-ec2-template.yml
+    parameters:
+      KeyName: aws-github-runner-1
+      InstanceType: t2.2xlarge
