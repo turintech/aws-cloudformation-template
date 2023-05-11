@@ -40,7 +40,7 @@ Resources:
   EvomlSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: My SG with port 22, 8080 and 80 inbound
+      GroupDescription: My SG with port 22 and 80 inbound
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: "80"
